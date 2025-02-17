@@ -1,16 +1,19 @@
-import requests
-from bs4 import BeautifulSoup
-import time
-import random
+import aiohttp
+import asyncio
 import json
 import datetime
 from typing import List, Optional, Dict, Any
-from lxml import html
-from playwright.sync_api import sync_playwright
 from logger import LoggerManager
 
 
 class BaseScraper:
+    """
+    Provides an asynchronous scraping base class with caching, rate-limited retries,
+    and concurrency control. Subclasses should override scrape_async() to add
+    custom scraping logic. This class can store data in JSON, with plans to support
+    saving data to a database in a future release.
+    """
+
     def __init__(
         self,
         scraper_name: str,
@@ -20,112 +23,183 @@ class BaseScraper:
         self.scraper_name = scraper_name
         self.logger_manager = LoggerManager(log_dir=log_dir)
         self.logger = self.logger_manager.get_logger(scraper_name)
-        self.session = requests.Session()
         self.proxies = proxies
-        self.current_proxy = None
-        self.proxy_fail_count = {}
 
-    def _fetch_page(
-        self, url: str, headers: Optional[Dict[str, str]] = None
+        self.visited_urls: set = set()
+        self.cached_pages: dict = {}
+
+        self.concurrency_limit: int = 100
+
+    async def _fetch_page_async(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: int = 15,
     ) -> Optional[str]:
-        """Fetch a web page with retry and proxy support."""
-        for attempt in range(5):
+        """
+        Fetches the specified URL asynchronously using an internal cache and exponential backoff.
+
+        Parameters:
+            session (aiohttp.ClientSession): The HTTP session for making requests.
+            url (str): The URL to request.
+            headers (Optional[Dict[str, str]]): Additional HTTP headers.
+            timeout (int): The request timeout, in seconds.
+
+        Returns:
+            Optional[str]: The response text if successful, otherwise None.
+        """
+        if url in self.visited_urls:
+            self.logger.debug(f"[CACHE HIT] Already visited: {url}")
+            return self.cached_pages.get(url)
+
+        max_retries = 6
+        wait_time = 1
+        max_wait_time = 15
+
+        for attempt in range(1, max_retries + 1):
             try:
-                proxy = self._get_proxy()
-                proxies = {"http": proxy, "https": proxy} if proxy else None
+                self.logger.debug(f"[ATTEMPT {attempt}] Fetching: {url}")
 
-                response = self.session.get(
-                    url, headers=headers, proxies=proxies, timeout=10
-                )
-                response.raise_for_status()
+                async with asyncio.timeout(timeout):
+                    async with session.get(url, headers=headers) as response:
+                        if response.status in [403, 429]:
+                            self.logger.warning(
+                                f"[RATE-LIMIT] {response.status} on {url}. Waiting {wait_time}s before retry."
+                            )
+                            await asyncio.sleep(wait_time)
+                            wait_time = min(wait_time * 2, max_wait_time)
+                            continue
 
-                response.encoding = response.apparent_encoding
-                self.logger.info(f"Fetching page: {url}")
-                return response.text
-            except requests.exceptions.HTTPError as e:
-                if response.status_code in [403, 429]:
-                    wait_time = 2**attempt
-                    self.logger.warning(
-                        f"Request failed ({response.status_code} {response.reason}). Retrying in {wait_time} seconds."
-                    )
-                    time.sleep(wait_time)
-                    if proxy:
-                        self._handle_proxy_failure(proxy)
-                else:
-                    self.logger.error(f"HTTP Error: {e}")
-                    return None
-            except requests.exceptions.RequestException as e:
-                self.logger.error(f"Request Exception: {e}")
+                        if response.status != 200:
+                            self.logger.error(
+                                f"[HTTP ERROR] Status: {response.status} on {url}"
+                            )
+                            return None
+
+                        text = await response.text()
+                        self.visited_urls.add(url)
+                        self.cached_pages[url] = text
+                        self.logger.info(f"[OK] Asynchronously fetched page: {url}")
+                        return text
+
+            except asyncio.TimeoutError:
+                self.logger.error(f"[TIMEOUT] Timeout while fetching {url}, skipping.")
                 return None
+            except aiohttp.ClientError as e:
+                self.logger.error(
+                    f"[EXCEPTION] {e} on {url}. Retrying in {wait_time}s..."
+                )
+                await asyncio.sleep(wait_time)
+                wait_time = min(wait_time * 2, max_wait_time)
+
+        self.logger.error(f"[FAIL] Max retries exceeded for {url}")
         return None
 
-    def _get_proxy(self) -> Optional[str]:
-        """Get a random working proxy, removing failed ones."""
-        if not self.proxies:
-            return None
-        if self.current_proxy and self.proxy_fail_count.get(self.current_proxy, 0) < 3:
-            return self.current_proxy
-        self.current_proxy = random.choice(self.proxies)
-        return self.current_proxy
-
-    def _handle_proxy_failure(self, proxy: str):
-        """Increase failure count for proxies and remove them if necessary."""
-        self.proxy_fail_count[proxy] = self.proxy_fail_count.get(proxy, 0) + 1
-        if self.proxy_fail_count[proxy] >= 3:
-            self.proxies.remove(proxy)
-            self.logger.warning(
-                f"Proxy {proxy} removed from rotation due to repeated failures."
-            )
-
-    def _random_delay(self):
-        """Introduce a random delay to avoid detection."""
-        delay = random.uniform(2, 5)
-        time.sleep(delay)
-
-    def _extract_data(
-        self, html_content: str, css_selector: str, xpath: Optional[str] = None
-    ) -> List[str]:
-        """Extract data from the HTML using either CSS selectors or XPath."""
-        if xpath:
-            tree = html.fromstring(html_content)
-            return tree.xpath(xpath)
-        soup = BeautifulSoup(html_content, "html.parser")
-        elements = soup.select(css_selector)
-        return [element.get_text(strip=True) for element in elements]
-
-    def _normalize_data(self, data: List[str]) -> List[str]:
-        """Normalize extracted data (strip spaces, fix encodings)."""
-        return [text.strip() for text in data]
-
-    def get_next_page(
-        self, html_content: str, next_button_selector: str = "a.next-page"
+    async def _limited_fetch_page_async(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        sem: asyncio.Semaphore,
+        headers: Optional[Dict[str, str]] = None,
     ) -> Optional[str]:
-        """Determine the next page URL using a customizable selector."""
-        soup = BeautifulSoup(html_content, "html.parser")
-        next_button = soup.select_one(next_button_selector)
-        return next_button["href"] if next_button else None
+        """
+        Fetches a page using an async request with concurrency control.
 
-    def _save_data(self, data: List[Dict[str, Any]], format: str = "json"):
-        """Save data to a file (default: JSON) with timestamped filename."""
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{self.scraper_name}_data_{timestamp}.json"
+        Args:
+            session (aiohttp.ClientSession): The HTTP session to use for the request.
+            url (str): The target URL.
+            sem (asyncio.Semaphore): The semaphore limiting concurrency.
+            headers (Optional[Dict[str, str]]): Additional request headers.
+
+        Returns:
+            Optional[str]: The response text if successfully fetched, otherwise None.
+        """
+        async with sem:
+            return await self._fetch_page_async(session, url, headers)
+
+    async def _fetch_multiple_pages_async(
+        self,
+        session: aiohttp.ClientSession,
+        urls: List[str],
+        headers: Optional[Dict[str, str]] = None,
+    ) -> List[Optional[str]]:
+        """
+        Fetches multiple URLs concurrently, respecting a concurrency limit.
+
+        Args:
+            session (aiohttp.ClientSession): The HTTP session used for the requests.
+            urls (List[str]): The list of URLs to be fetched.
+            headers (Optional[Dict[str, str]]): Additional headers for the requests.
+
+        Returns:
+            List[Optional[str]]: The content of each successfully fetched page, or None if it failed.
+        """
+        if not urls:
+            return []
+
+        self.logger.debug(f"[MULTI] Starting async fetch for {len(urls)} URLs...")
+
+        sem = asyncio.Semaphore(self.concurrency_limit)
+        tasks = [
+            self._limited_fetch_page_async(session, url, sem, headers) for url in urls
+        ]
+        results = await asyncio.gather(*tasks)
+
+        final_results = []
+        for url, res in zip(urls, results):
+            if res is None:
+                self.logger.error(f"[ERROR] Failed to fetch {url}")
+                final_results.append(None)
+            else:
+                final_results.append(res)
+
+        self.logger.info(f"[MULTI] Fetched {len(final_results)}/{len(urls)} pages.")
+        return final_results
+
+    def _save_data(
+        self,
+        data: List[Dict[str, Any]],
+        filename: Optional[str] = None,
+        format: str = "json",
+    ):
+        """
+        Save the provided data to a JSON file with a time-stamped filename if none is specified.
+
+        Parameters
+        ----------
+        data : List[Dict[str, Any]]
+            Data to be saved.
+        filename : Optional[str]
+            Optional custom filename.
+        format : str
+            Desired file format (default: "json").
+
+        Note
+        ----
+        This implementation is only temporary and will be modified to store data in a database instead of JSON files.
+        """
+        if not filename:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{self.scraper_name}_data_{timestamp}.json"
         if format == "json":
-            with open(filename, "w") as f:
-                json.dump(data, f, indent=4)
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
 
-    def enable_playwright(self):
-        """Enable Playwright for handling JavaScript-rendered pages."""
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(headless=True)
-        self.page = self.browser.new_page()
+    async def scrape_async(self, url: str):
+        """
+        Scrapes data asynchronously from the specified URL.
 
-    def close_playwright(self):
-        """Close Playwright instances."""
-        if hasattr(self, "browser"):
-            self.browser.close()
-        if hasattr(self, "playwright"):
-            self.playwright.stop()
+        :param url: The target URL to scrape.
+        :raises NotImplementedError: If the method is not overridden by a subclass.
+        """
+        raise NotImplementedError("Subclasses must implement this method (async).")
 
-    def scrape(self, url: str, headers: Optional[Dict[str, str]] = None):
-        """Placeholder method. To be implemented in subclasses."""
-        raise NotImplementedError("Subclasses must implement this method.")
+    def scrape(self, url: str):
+        """
+        Synchronous interface to the asynchronous scraping logic.
+
+        :param url: The target URL to scrape.
+        :return: The result of the asynchronous scraping operation.
+        """
+        return asyncio.run(self.scrape_async(url))
