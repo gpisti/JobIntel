@@ -135,11 +135,18 @@ class ProfessionScraper(BaseScraper):
 
         return {
             "title": self._extract_text(soup, "#job-title"),
-            "company": self._extract_text(soup, "#main > div ... > h2"),
-            "location": self._extract_text(soup, "#main > div ... > h2"),
+            "company": self._extract_text(
+                soup,
+                "#main > div:nth-child(1) > div > div.adv-cover-wrapper > div.adv-cover > div > div > div > section > ul > li:nth-child(1) > div > h2",
+            ),
+            "location": self._extract_text(
+                soup,
+                "#main > div:nth-child(1) > div > div.adv-cover-wrapper > div.adv-cover > div > div > div > section > ul > li:nth-child(2) > div > div.my-auto > h2",
+            ),
             "job_url": job_url,
             "full_description": self._extract_text(
-                soup, "#content > div ... > section"
+                soup,
+                "#content > div > div:nth-child(1) > div > div > div.wrap > div > div > section",
             ),
             "source_platform": "Profession.hu",
             "session_id": self.session_id,
