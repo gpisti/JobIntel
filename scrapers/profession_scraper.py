@@ -98,6 +98,8 @@ class ProfessionScraper(BaseScraper):
                     session, batch
                 )
 
+                job_data = []
+
                 for j, html_content in enumerate(job_details_pages):
                     if html_content:
                         job_url = batch[j]
@@ -105,11 +107,11 @@ class ProfessionScraper(BaseScraper):
                         if details:
                             job_data.append(details)
 
-                self._save_data(job_data, f"job_data_batch_{batch_count}.json")
+                self._save_data(job_data)
                 self.logger.info(
                     f"[BATCH SAVE] Saved batch {batch_count} with {len(job_data)} records."
                 )
-                job_data = []
+                del job_data
                 batch_count += 1
 
             self.logger.info("[SCRAPE DONE]")
@@ -130,21 +132,17 @@ class ProfessionScraper(BaseScraper):
         """
 
         soup = BeautifulSoup(html_content, "html.parser")
+
         return {
             "title": self._extract_text(soup, "#job-title"),
-            "company": self._extract_text(
-                soup,
-                "#main > div:nth-child(1) > div > div.adv-cover-wrapper > div.adv-cover > div > div > div > section > ul > li:nth-child(1) > div > h2",
-            ),
-            "location": self._extract_text(
-                soup,
-                "#main > div:nth-child(1) > div > div.adv-cover-wrapper > div.adv-cover > div > div > div > section > ul > li:nth-child(2) > div > div.my-auto > h2",
-            ),
+            "company": self._extract_text(soup, "#main > div ... > h2"),
+            "location": self._extract_text(soup, "#main > div ... > h2"),
             "job_url": job_url,
             "full_description": self._extract_text(
-                soup,
-                "#content > div > div:nth-child(1) > div > div > div.wrap > div > div > section",
+                soup, "#content > div ... > section"
             ),
+            "source_platform": "Profession.hu",
+            "session_id": self.session_id,
         }
 
     def _extract_text(self, soup: BeautifulSoup, selector: str) -> Optional[str]:
