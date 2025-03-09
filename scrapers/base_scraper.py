@@ -1,9 +1,9 @@
 import aiohttp
 import asyncio
-import json
-import datetime
-from typing import List, Optional, Dict, Any
+from database.db_manager import save_raw_jobs_to_db
+from typing import List, Optional, Dict
 from logger import LoggerManager
+import uuid
 
 
 class BaseScraper:
@@ -29,6 +29,8 @@ class BaseScraper:
         self.cached_pages: dict = {}
 
         self.concurrency_limit: int = 100
+
+        self.session_id = str(uuid.uuid4())
 
     async def _fetch_page_async(
         self,
@@ -157,34 +159,16 @@ class BaseScraper:
         self.logger.info(f"[MULTI] Fetched {len(final_results)}/{len(urls)} pages.")
         return final_results
 
-    def _save_data(
-        self,
-        data: List[Dict[str, Any]],
-        filename: Optional[str] = None,
-        format: str = "json",
-    ):
-        """
-        Save the provided data to a JSON file with a time-stamped filename if none is specified.
 
-        Parameters
-        ----------
-        data : List[Dict[str, Any]]
-            Data to be saved.
-        filename : Optional[str]
-            Optional custom filename.
-        format : str
-            Desired file format (default: "json").
-
-        Note
-        ----
-        This implementation is only temporary and will be modified to store data in a database instead of JSON files.
+    def _save_data(self, data):
         """
-        if not filename:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{self.scraper_name}_data_{timestamp}.json"
-        if format == "json":
-            with open(filename, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
+        Menti az adatokat az adatbázisba a `raw_jobs` táblába.
+        """
+        if data:
+            save_raw_jobs_to_db(data)
+            self.logger.info(f"Saved {len(data)} jobs to the database.")
+        else:
+            self.logger.warning("No data to save.")
 
     async def scrape_async(self, url: str):
         """
