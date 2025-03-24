@@ -5,10 +5,8 @@ from scrapers.base_scraper import BaseScraper
 
 
 class ProfessionScraper(BaseScraper):
-    """
-    A scraper class that retrieves job listings from a specified site, parses job details,
-    and saves them in batches. It inherits from BaseScraper to leverage asynchronous data
-    fetching, caching, and logging capabilities.
+    """A specialized scraper for Profession.hu job listings, extending BaseScraper to handle asynchronous page fetching, logging, data parsing, and storage.
+    Provides methods to traverse multiple pages, extract job details from HTML content, and save retrieved data in batches.
     """
 
     def __init__(
@@ -17,26 +15,21 @@ class ProfessionScraper(BaseScraper):
         proxies: Optional[List[str]] = None,
         log_dir: str = "logs",
     ):
+        """
+        Initialize the ProfessionScraper with the given scraper name, optional proxies, and a log directory.
+
+        Sets the default base URL to 'https://www.profession.hu' and the number of jobs per page to 20.
+        """
         super().__init__(scraper_name, proxies, log_dir)
         self.base_url: str = "https://www.profession.hu"
         self.jobs_per_page: int = 20
 
     async def scrape_async(self, start_url: str):
         """
-        Asynchronously scrape job listings from the specified start URL.
+        Asynchronously scrapes job listings starting from the given URL, collects and processes job links in batches, and stores the extracted data.
 
-        Determines the total number of job postings, iterates through
-        the calculated pages, collects job URLs, extracts detailed
-        information, and saves data in batches. Progress is logged at
-        each step.
-
-        Parameters:
-            start_url (str): The initial page URL to commence scraping.
-
-        Returns:
-            None
+        :param start_url: The initial URL to begin scraping from.
         """
-
         self.logger.info(f"[SCRAPE START] {start_url}")
 
         async with aiohttp.ClientSession() as session:
@@ -84,7 +77,6 @@ class ProfessionScraper(BaseScraper):
                 f"[JOB URLS] Found {len(job_urls)} job links. Now fetching details..."
             )
 
-            job_data = []
             batch_size = 1000
             batch_count = 1
 
@@ -99,7 +91,6 @@ class ProfessionScraper(BaseScraper):
                 )
 
                 job_data = []
-
                 for j, html_content in enumerate(job_details_pages):
                     if html_content:
                         job_url = batch[j]
@@ -120,17 +111,12 @@ class ProfessionScraper(BaseScraper):
         self, html_content: str, job_url: str
     ) -> Dict[str, Optional[str]]:
         """
-        Extracts job details from the provided HTML content using BeautifulSoup.
+        Extracts job information such as title, company, location, and description from the given HTML content.
 
-        Args:
-            html_content (str): The raw HTML content of a job listing page.
-            job_url (str): The direct URL to the job posting.
-
-        Returns:
-            Dict[str, Optional[str]]: A dictionary containing extracted job details such as
-            title, company, location, job URL, and a full description.
+        :param html_content: The raw HTML content of the job listing.
+        :param job_url: The URL of the job listing.
+        :return: A dictionary containing the extracted job details.
         """
-
         soup = BeautifulSoup(html_content, "html.parser")
 
         return {
@@ -144,7 +130,7 @@ class ProfessionScraper(BaseScraper):
                 "#main > div:nth-child(1) > div > div.adv-cover-wrapper > div.adv-cover > div > div > div > section > ul > li:nth-child(2) > div > div.my-auto > h2",
             ),
             "job_url": job_url,
-            "full_description": self._extract_text(
+            "description": self._extract_text(
                 soup,
                 "#content > div > div:nth-child(1) > div > div > div.wrap > div > div > section",
             ),
@@ -154,13 +140,12 @@ class ProfessionScraper(BaseScraper):
 
     def _extract_text(self, soup: BeautifulSoup, selector: str) -> Optional[str]:
         """
-        Extracts text from the first HTML element matching the given CSS selector.
+        Extracts text from the first matching element using the specified CSS selector.
 
-        :param soup: A BeautifulSoup instance representing the parsed HTML.
-        :param selector: A string containing a CSS selector to locate the desired element.
-        :return: The stripped text of the found element, or None if the element is not found.
+        :param soup: The BeautifulSoup object to search in.
+        :param selector: The CSS selector string.
+        :return: The stripped text content or None if the element is not found.
         """
-
         elem = soup.select_one(selector)
         return elem.get_text(strip=True) if elem else None
 
