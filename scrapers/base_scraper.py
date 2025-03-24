@@ -1,6 +1,6 @@
 import aiohttp
 import asyncio
-from database.db_manager import save_raw_jobs_to_db
+from database.mongo.mongo_manager import MongoManager
 from typing import List, Optional, Dict
 from logger import LoggerManager
 import uuid
@@ -8,10 +8,8 @@ import uuid
 
 class BaseScraper:
     """
-    Provides an asynchronous scraping base class with caching, rate-limited retries,
-    and concurrency control. Subclasses should override scrape_async() to add
-    custom scraping logic. This class can store data in JSON, with plans to support
-    saving data to a database in a future release.
+    Base class for async scraping with retry, rate limiting, and concurrency control.
+    Child scrapers should override `scrape_async()`.
     """
 
     def __init__(
@@ -20,16 +18,25 @@ class BaseScraper:
         proxies: Optional[List[str]] = None,
         log_dir: str = "logs",
     ):
+        """
+        Initialize the scraper with a logger, MongoDB manager, and optional proxies.
+
+        Args:
+            scraper_name (str): Unique name for the scraper.
+            proxies (Optional[List[str]]): Optional list of proxy URLs to use.
+            log_dir (str): Directory where log files are stored. Defaults to "logs".
+        """
         self.scraper_name = scraper_name
+
         self.logger_manager = LoggerManager(log_dir=log_dir)
         self.logger = self.logger_manager.get_logger(scraper_name)
-        self.proxies = proxies
 
+        self.mongo_manager = MongoManager(self.logger_manager)
+
+        self.proxies = proxies
         self.visited_urls: set = set()
         self.cached_pages: dict = {}
-
         self.concurrency_limit: int = 100
-
         self.session_id = str(uuid.uuid4())
 
     async def _fetch_page_async(
@@ -40,16 +47,18 @@ class BaseScraper:
         timeout: int = 15,
     ) -> Optional[str]:
         """
-        Fetches the specified URL asynchronously using an internal cache and exponential backoff.
+        Asynchronously fetches the page content from the given URL, caching successful responses.
+        Retries on rate limits and client errors up to a maximum number of attempts, with incremental
+        backoff. Returns the fetched text if successful, or None otherwise.
 
-        Parameters:
-            session (aiohttp.ClientSession): The HTTP session for making requests.
-            url (str): The URL to request.
-            headers (Optional[Dict[str, str]]): Additional HTTP headers.
-            timeout (int): The request timeout, in seconds.
+        Args:
+            session (aiohttp.ClientSession): The session to use for HTTP requests.
+            url (str): The target URL.
+            headers (Optional[Dict[str, str]]): Optional headers to include in the request.
+            timeout (int): The maximum time to await the response.
 
         Returns:
-            Optional[str]: The response text if successful, otherwise None.
+            Optional[str]: The HTML content if the fetch is successful, otherwise None.
         """
         if url in self.visited_urls:
             self.logger.debug(f"[CACHE HIT] Already visited: {url}")
@@ -106,16 +115,18 @@ class BaseScraper:
         headers: Optional[Dict[str, str]] = None,
     ) -> Optional[str]:
         """
-        Fetches a page using an async request with concurrency control.
+        Acquires the provided concurrency-limiting semaphore before asynchronously
+        fetching the specified URL. Once the semaphore is secured, this method
+        delegates the work to _fetch_page_async.
 
         Args:
-            session (aiohttp.ClientSession): The HTTP session to use for the request.
+            session (aiohttp.ClientSession): The session used for HTTP requests.
             url (str): The target URL.
-            sem (asyncio.Semaphore): The semaphore limiting concurrency.
-            headers (Optional[Dict[str, str]]): Additional request headers.
+            sem (asyncio.Semaphore): Controls concurrency.
+            headers (Optional[Dict[str, str]]): Optional request headers.
 
         Returns:
-            Optional[str]: The response text if successfully fetched, otherwise None.
+            Optional[str]: The page content, or None if fetching fails.
         """
         async with sem:
             return await self._fetch_page_async(session, url, headers)
@@ -127,15 +138,15 @@ class BaseScraper:
         headers: Optional[Dict[str, str]] = None,
     ) -> List[Optional[str]]:
         """
-        Fetches multiple URLs concurrently, respecting a concurrency limit.
+        Asynchronously fetches multiple URLs using a limited concurrency approach.
 
         Args:
-            session (aiohttp.ClientSession): The HTTP session used for the requests.
-            urls (List[str]): The list of URLs to be fetched.
+            session (aiohttp.ClientSession): The session used for sending requests.
+            urls (List[str]): The list of URLs to fetch.
             headers (Optional[Dict[str, str]]): Additional headers for the requests.
 
         Returns:
-            List[Optional[str]]: The content of each successfully fetched page, or None if it failed.
+            List[Optional[str]]: The HTML content of each URL, or None for failed fetches.
         """
         if not urls:
             return []
@@ -159,31 +170,35 @@ class BaseScraper:
         self.logger.info(f"[MULTI] Fetched {len(final_results)}/{len(urls)} pages.")
         return final_results
 
-
     def _save_data(self, data):
         """
-        Menti az adatokat az adatbázisba a `raw_jobs` táblába.
+        Save the provided data to MongoDB using the internal manager.
+
+        :param data: The data to be saved.
         """
         if data:
-            save_raw_jobs_to_db(data)
-            self.logger.info(f"Saved {len(data)} jobs to the database.")
+            self.mongo_manager.insert_jobs(data)
+            self.logger.info(f"Saved {len(data)} jobs to MongoDB.")
         else:
             self.logger.warning("No data to save.")
 
     async def scrape_async(self, url: str):
         """
-        Scrapes data asynchronously from the specified URL.
+        Asynchronously scrape data from the specified URL.
 
-        :param url: The target URL to scrape.
-        :raises NotImplementedError: If the method is not overridden by a subclass.
+        Args:
+            url (str): The URL to scrape.
+
+        Raises:
+            NotImplementedError: Indicates that subclasses must implement this method.
         """
         raise NotImplementedError("Subclasses must implement this method (async).")
 
     def scrape(self, url: str):
         """
-        Synchronous interface to the asynchronous scraping logic.
+        Synchronously scrape the specified URL by invoking the asynchronous scraping method.
 
-        :param url: The target URL to scrape.
-        :return: The result of the asynchronous scraping operation.
+        :param url: The URL to scrape.
+        :return: The result from the asynchronous scraping operation.
         """
         return asyncio.run(self.scrape_async(url))
