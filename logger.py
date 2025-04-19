@@ -33,29 +33,42 @@ class LoggerManager:
         self.rotation_when = rotation_when
         self.rotation_interval = rotation_interval
         self.default_log_level = default_log_level
-
         self.log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
 
-        self._global_logger = None
+        self._loggers = {}
+        
+        self._global_logger = self.get_logger("global")
 
     def get_logger(self, name: str, level=None) -> logging.Logger:
         """
         Retrieve a named logger at a specified log level, creating a new file handler if necessary.
         If no level is provided, the default log level is used. The returned logger does not
         propagate log messages to its parent.
+        
+        Args:
+            name (str): Name of the logger, also used for the log file
+            level (int, optional): Logging level. Defaults to None (uses default_log_level).
+            
+        Returns:
+            logging.Logger: Configured logger instance
         """
+        if name in self._loggers:
+            return self._loggers[name]
+            
         if level is None:
             level = self.default_log_level
 
         logger = logging.getLogger(name)
         logger.setLevel(level)
+        logger.propagate = False
 
         if not logger.handlers:
+            log_path = os.path.join(self.log_dir, f"{name}.log")
             file_handler = TimedRotatingFileHandler(
-                os.path.join(self.log_dir, f"{name}.log"),
+                log_path,
                 when=self.rotation_when,
                 interval=self.rotation_interval,
                 backupCount=self.backup_count,
@@ -64,8 +77,7 @@ class LoggerManager:
             file_handler.setFormatter(logging.Formatter(self.log_format))
             logger.addHandler(file_handler)
 
-            logger.propagate = False
-
+        self._loggers[name] = logger
         return logger
 
     @property
@@ -77,6 +89,19 @@ class LoggerManager:
             logging.Logger: The global logger instance.
         """
         return self._global_logger
+
+    def log_milestone(self, message: str, component: str = None):
+        """
+        Logs an important application milestone to the global logger.
+        
+        Args:
+            message (str): The milestone message to log
+            component (str, optional): The system component generating this milestone
+        """
+        if component:
+            self._global_logger.info(f"[{component.upper()}] {message}")
+        else:
+            self._global_logger.info(message)
 
     def log_failed_insert(self, table: str, data: dict, error: str):
         """
@@ -90,4 +115,37 @@ class LoggerManager:
         failed_log_path = os.path.join(self.log_dir, "failed_inserts.log")
         with open(failed_log_path, "a", encoding="utf-8") as f:
             f.write(f"Table: {table}, Data: {data}, Error: {error}\n")
+            
         self._global_logger.error(f"Failed insert in {table}: {error} - Data: {data}")
+
+    def log_progress(self, current: int, total: int, operation: str = "processing", component: str = None):
+        """
+        Log standardized progress information with milestone tracking.
+        
+        Args:
+            current: Current number of items processed
+            total: Total number of items to process
+            operation: Description of the operation for log messages
+            component: The component generating the progress update
+        """
+        if total <= 0:
+            return
+            
+        progress = (current / total) * 100
+        
+        if component:
+            logger = self.get_logger(component)
+        else:
+            logger = self._global_logger
+            
+        logger.info(f"Progress: {progress:.1f}% complete ({current}/{total})")
+        
+        milestones = [10, 25, 50, 75, 100]
+        for milestone in milestones:
+            if (progress >= milestone and 
+                ((current - 1) / total * 100) < milestone):
+                self.log_milestone(
+                    f"{milestone}% complete: {current}/{total} items {operation}",
+                    component
+                )
+                
